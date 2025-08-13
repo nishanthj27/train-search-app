@@ -23,6 +23,7 @@ services:
       NODE_ENV: production
       MONGODB_URI: mongodb://admin:password@mongodb:27017/traindb?authSource=admin
       PORT: 5000
+      FRONTEND_ORIGIN: http://localhost:3000
     depends_on:
       - mongodb
     volumes:
@@ -30,13 +31,18 @@ services:
       - /app/node_modules
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: train-frontend
     restart: always
     ports:
       - "3000:80"
     depends_on:
       - backend
+    environment:
+      # Leave REACT_APP_API_URL blank so the frontend's nginx can proxy /api to backend
+      - REACT_APP_API_URL=
 
 volumes:
   mongodb_data:

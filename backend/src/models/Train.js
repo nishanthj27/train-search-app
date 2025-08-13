@@ -1,3 +1,4 @@
+// backend/src/models/Train.js (modified)
 const mongoose = require('mongoose');
 
 const stopSchema = new mongoose.Schema({
@@ -13,5 +14,8 @@ const trainSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+
+// index for fast station lookups
+trainSchema.index({ 'stops.station': 1 });
 
 module.exports = mongoose.model('Train', trainSchema);

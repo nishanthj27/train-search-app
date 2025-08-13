@@ -1,73 +1,96 @@
+// backend/src/services/trainSearchService.js
 const Train = require('../models/Train');
 
 class TrainSearchService {
   static PRICE_PER_KM = 1.25;
 
+  // Use aggregation to compute direct routes on DB side
   static async findDirectTrains(source, destination) {
-    const trains = await Train.find({
-      'stops.station': { $all: [source, destination] }
-    });
-
-    const directTrains = [];
-    
-    for (const train of trains) {
-      const sourceIndex = train.stops.findIndex(stop => stop.station === source);
-      const destIndex = train.stops.findIndex(stop => stop.station === destination);
-      
-      if (sourceIndex !== -1 && destIndex !== -1 && sourceIndex < destIndex) {
-        const distance = this.calculateDistance(train.stops, sourceIndex, destIndex);
-        const price = distance * this.PRICE_PER_KM;
-        
-        directTrains.push({
-          trainName: train.trainName,
-          trainNumber: train.trainNumber,
-          startingTime: train.stops[sourceIndex].departureTime,
-          reachingTime: train.stops[destIndex].departureTime,
-          distance,
-          price,
-          type: 'direct'
-        });
+    const pipeline = [
+      { $match: { 'stops.station': { $all: [source, destination] } } },
+      {
+        $addFields: {
+          sourceIndex: { $indexOfArray: ['$stops.station', source] },
+          destIndex: { $indexOfArray: ['$stops.station', destination] }
+        }
+      },
+      { $match: { $expr: { $lt: ['$sourceIndex', '$destIndex'] } } },
+      {
+        $addFields: {
+          // slice stops between sourceIndex+1 and destIndex (inclusive of dest)
+          segment: {
+            $slice: [
+              '$stops',
+              { $add: ['$sourceIndex', 1] },
+              { $subtract: ['$destIndex', '$sourceIndex'] }
+            ]
+          }
+        }
+      },
+      {
+        $addFields: {
+          distance: {
+            $reduce: {
+              input: '$segment',
+              initialValue: 0,
+              in: { $add: ['$$value', '$$this.distanceFromPrevious'] }
+            }
+          },
+          startingTime: { $arrayElemAt: ['$stops.departureTime', '$sourceIndex'] },
+          reachingTime: { $arrayElemAt: ['$stops.departureTime', '$destIndex'] }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          trainName: 1,
+          trainNumber: 1,
+          startingTime: 1,
+          reachingTime: 1,
+          distance: 1
+        }
       }
-    }
-    
-    return directTrains;
+    ];
+
+    const docs = await Train.aggregate(pipeline).exec();
+
+    return docs.map(doc => ({
+      trainName: doc.trainName,
+      trainNumber: doc.trainNumber,
+      startingTime: doc.startingTime,
+      reachingTime: doc.reachingTime,
+      distance: doc.distance,
+      price: doc.distance * this.PRICE_PER_KM,
+      type: 'direct'
+    }));
   }
 
   static async findConnectingTrains(source, destination) {
-    const allTrains = await Train.find({});
+    // Query only trains that actually pass through source or destination
+    const fromSourceTrains = await Train.find({ 'stops.station': source }).lean();
+    const toDestTrains = await Train.find({ 'stops.station': destination }).lean();
+
     const connectingRoutes = [];
-    
-    // Find trains from source to intermediate stations
-    const fromSourceTrains = allTrains.filter(train => 
-      train.stops.some(stop => stop.station === source)
-    );
-    
-    // Find trains from intermediate stations to destination
-    const toDestTrains = allTrains.filter(train => 
-      train.stops.some(stop => stop.station === destination)
-    );
-    
+
     for (const sourceTrain of fromSourceTrains) {
-      const sourceStopIndex = sourceTrain.stops.findIndex(stop => stop.station === source);
+      const sourceStopIndex = sourceTrain.stops.findIndex(s => s.station === source);
       if (sourceStopIndex === -1) continue;
-      
-      // Check all stations after source in this train
+
+      // check every station after source in this train
       for (let i = sourceStopIndex + 1; i < sourceTrain.stops.length; i++) {
         const intermediateStation = sourceTrain.stops[i].station;
-        
-        // Find trains from intermediate station to destination
+
         for (const destTrain of toDestTrains) {
           if (sourceTrain.trainNumber === destTrain.trainNumber) continue;
-          
-          const intStopIndex = destTrain.stops.findIndex(stop => stop.station === intermediateStation);
-          const destStopIndex = destTrain.stops.findIndex(stop => stop.station === destination);
-          
+
+          const intStopIndex = destTrain.stops.findIndex(s => s.station === intermediateStation);
+          const destStopIndex = destTrain.stops.findIndex(s => s.station === destination);
+
           if (intStopIndex !== -1 && destStopIndex !== -1 && intStopIndex < destStopIndex) {
             const firstLegDistance = this.calculateDistance(sourceTrain.stops, sourceStopIndex, i);
             const secondLegDistance = this.calculateDistance(destTrain.stops, intStopIndex, destStopIndex);
             const totalDistance = firstLegDistance + secondLegDistance;
-            const totalPrice = totalDistance * this.PRICE_PER_KM;
-            
+
             connectingRoutes.push({
               firstTrain: {
                 trainName: sourceTrain.trainName,
@@ -87,21 +110,21 @@ class TrainSearchService {
               },
               intermediateStation,
               totalDistance,
-              totalPrice,
+              totalPrice: totalDistance * this.PRICE_PER_KM,
               type: 'connecting'
             });
           }
         }
       }
     }
-    
+
     return connectingRoutes;
   }
 
   static calculateDistance(stops, fromIndex, toIndex) {
     let distance = 0;
     for (let i = fromIndex + 1; i <= toIndex; i++) {
-      distance += stops[i].distanceFromPrevious;
+      distance += stops[i].distanceFromPrevious || 0;
     }
     return distance;
   }
@@ -109,10 +132,9 @@ class TrainSearchService {
   static async searchTrains(source, destination, sortBy = 'price') {
     const directTrains = await this.findDirectTrains(source, destination);
     const connectingTrains = await this.findConnectingTrains(source, destination);
-    
+
     let allRoutes = [...directTrains, ...connectingTrains];
-    
-    // Sort based on criteria
+
     if (sortBy === 'price') {
       allRoutes.sort((a, b) => {
         const priceA = a.type === 'direct' ? a.price : a.totalPrice;
@@ -126,20 +148,14 @@ class TrainSearchService {
         return timeA.localeCompare(timeB);
       });
     }
-    
+
     return allRoutes;
   }
 
   static async getAllStations() {
-    const trains = await Train.find({});
+    const trains = await Train.find({}).lean();
     const stationsSet = new Set();
-    
-    trains.forEach(train => {
-      train.stops.forEach(stop => {
-        stationsSet.add(stop.station);
-      });
-    });
-    
+    trains.forEach(train => train.stops.forEach(s => stationsSet.add(s.station)));
     return Array.from(stationsSet).sort();
   }
 }
