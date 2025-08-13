@@ -1,17 +1,30 @@
 // backend/src/app.js
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
 const trainRoutes = require('./routes/trainRoutes');
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS - restrict origin in production via FRONTEND_ORIGIN env var
+// ✅ CORS - allow multiple origins for local + production frontend
+const allowedOrigins = [
+  'http://localhost:3000', // Local development React app
+  process.env.FRONTEND_ORIGIN // Production frontend (set in Render later)
+];
+
 const corsOptions = {
-  origin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
+  origin: function (origin, callback) {
+    // allow requests with no origin (like curl or Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
   optionsSuccessStatus: 200
 };
 
@@ -20,19 +33,6 @@ app.use(express.json());
 
 // Routes
 app.use('/api/trains', trainRoutes);
-
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Serve React frontend
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
 
 // Health check
 app.get('/health', (req, res) => {
